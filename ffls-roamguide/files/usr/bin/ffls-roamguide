@@ -2,6 +2,26 @@
 
 . /lib/functions.sh
 
+LOCK="/tmp/roamguide.lock"
+
+err(){
+  (>&2 echo "[${0}]" $@)
+}
+
+try_lock(){
+  if [ -f "$LOCK" ]; then
+    pid="$(cat "$LOCK")"
+    if [ -e "/proc/${pid}" ]; then
+      err "Already running!"
+      exit 1
+    fi
+    err "Ignoring stale lockfile"
+  fi
+  rm -rf "$LOCK"
+  echo "$$" > "$LOCK"
+  trap "rm $LOCK" EXIT
+}
+
 wifi_kick(){
   local dev="$1" ; shift
   local mac="$1" ; shift
@@ -49,13 +69,13 @@ count_cleanup() {
 
 client_macs() {
   local dev="$1"
-  iw dev "${dev}" station dump | grep Station | sed -e 's/^[^ ]\+ \([0-9a-z:]*\) .*/\1/' 
+  iw dev "${dev}" station dump | grep Station | sed -e 's/^[^ ]\+ \([0-9a-z:]*\) .*/\1/'
 }
 
 client_tq() {
   local dev="$1"
   local mac="$2"
-  iw dev "${dev}" station get "${mac}" | grep "signal avg" | xargs | cut -d' ' -f 3
+  iw dev "${dev}" station get "${mac}" 2>/dev/null | grep "signal avg" | xargs | cut -d' ' -f 3
 }
 
 roamguide() {
@@ -89,10 +109,11 @@ roamlevel(){
       logger -s -t roamguide "${device}: ban ${mac} ${tq}dBm for ${bantime}ms"
       wifi_kick "${device}" "${mac}" "${bantime}"
       break # quits config_list_foreach
-    fi 
+    fi
   fi
   level=$(expr $level + 1)
 }
 
-config_load 'ffls-roamguide'
-config_foreach roamguide 'ffls-roamguide'
+try_lock
+config_load 'roamguide'
+config_foreach roamguide 'roamguide'
