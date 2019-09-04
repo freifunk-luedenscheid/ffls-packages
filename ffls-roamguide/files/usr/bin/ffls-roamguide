@@ -115,5 +115,5 @@ roamlevel(){
 }
 
 try_lock
-config_load 'roamguide'
-config_foreach roamguide 'roamguide'
+config_load 'ffls-roamguide'
+config_foreach ffls-roamguide 'ffls-roamguide'
