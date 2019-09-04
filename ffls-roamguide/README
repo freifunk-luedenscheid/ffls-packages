@@ -22,10 +22,10 @@ it will be forgotten, and the guiding will be re-enable.
 Configuration
 -------------
 
-In '/etc/config/roamguide' the following default configuration is available,
+In '/etc/config/ffls-roamguide' the following default configuration is available,
 to activate it you need to set enabled to '1'.
 
-    config roamguide
+    config ffls-roamguide
        option device "client0"        # wireless AP device we like to guide
        list signal '-60'              # first penality level, in dBm
        list signal '-77'              # second penality level, in dBm
@@ -36,26 +36,26 @@ to activate it you need to set enabled to '1'.
        option forget_time '600'       # Forget about a client after 10s
        option enabled '0'             # set to '1' to enable this profile
 
-This module creates a cronjob calling /usr/bin/roamguide once a minute.
+This module creates a cronjob calling /usr/bin/ffls-roamguide once a minute.
 If you want to make roamguide more reactive (but also stress your device) you can add some more cron jobs with sleep timers in /usr/lib/micron.d/root:
 
-    * * * * * sleep 20 & /usr/bin/roamguide
-    * * * * * sleep 40 & /usr/bin/roamguide
+    * * * * * sleep 20 & /usr/bin/ffls-roamguide
+    * * * * * sleep 40 & /usr/bin/ffls-roamguide
 
 ### Configure your node with ssh calls
 
 Disable roamguide:
 
-     ssh <router> 'uci set roamguide.@roamguide[0].enabled="0"; uci commit roamguide && echo done'
+     ssh <router> 'uci set ffls-roamguide.@ffls-roamguide[0].enabled="0"; uci commit ffls-roamguide && echo done'
 
 Make roamguide more reactive:
 
-     ssh <router> 'grep -q "sleep 20" /usr/lib/micron.d/roamguide || echo -e "\n* * * * * sleep 20 & /usr/bin/roamguide" >> /usr/lib/micron.d/roamguide'
-     ssh <router> 'grep -q "sleep 40" /usr/lib/micron.d/roamguide || echo "* * * * * sleep 40 & /usr/bin/roamguide" >> /usr/lib/micron.d/roamguide'
+     ssh <router> 'grep -q "sleep 20" /usr/lib/micron.d/ffls-roamguide || echo -e "\n* * * * * sleep 20 & /usr/bin/ffls-roamguide" >> /usr/lib/micron.d/roamguide'
+     ssh <router> 'grep -q "sleep 40" /usr/lib/micron.d/ffls-roamguide || echo "* * * * * sleep 40 & /usr/bin/ffls-roamguide" >> /usr/lib/micron.d/roamguide'
 
 Configure different boundaries:
 
-    ssh <router> 'uci set roamguide.@roamguide[0].signal='-60'; uci add_list roamguide.@roamguide[0].signal='-70'; uci add_list roamguide.@roamguide[0].signal='-80'; uci commit roamguide && echo done'
+    ssh <router> 'uci set ffls-roamguide.@ffls-roamguide[0].signal='-60'; uci add_list ffls-roamguide.@ffls-roamguide[0].signal='-70'; uci add_list ffls-roamguide.@ffls-roamguide[0].signal='-80'; uci commit ffls-roamguide && echo done'
 
 ### Testing tools
 
