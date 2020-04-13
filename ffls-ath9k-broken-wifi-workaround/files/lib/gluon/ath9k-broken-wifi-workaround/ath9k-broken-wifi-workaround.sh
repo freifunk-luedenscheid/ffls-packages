@@ -1,255 +1,186 @@
 #!/bin/sh
+#
+# this script tries to recover nodes that have problems with wifi connections
+#
+# limitations:
+# - restarts every ath9k radio device, not only affected ones
+# - if all of	a) there are multiple radios
+# 				b) at least one is not affected by the bug
+# 				c) there are still batman clients using a working radio
+# 				d) a gateway is reachable
+# 		is true, this script fails to recover broken radios
 
-######################################################################################
-# 
-# Dateiname:
-# ath9k-broken-wifi-workaround.sh
-# 
-# Aufruf:
-# /lib/gluon/ath9k-broken-wifi-workaround/ath9k-broken-wifi-workaround.sh
-# (keine Uebergabeparameter)
-# 
-# Cronjob:
-# Dieses Skript muss zyklisch aufgerufen werden. 
-# Z.z. ueber /usr/lib/micron.d/ath9k-broken-wifi-workaround alle 2 Minuten.
-# 
-# Funktion:
-# 1) Ueberpruefen, ob ueberhaupt ein Problemtest durchgefuehrt werden kann/soll.
-# 2) Auswertung von ath9k Treiber-Flags. Ist wahrscheinlich Schlangenoil !?!
-# 3) Ueberpruefen, welche WLAN-Konnektivitaet vorhanden ist und dieses merken.
-# 4) Ueberpruefen ob eine Gateway/UpLink Verbindung besteht und dieses merken.
-# 5) Auswerten ueber die Zeit von WLAN Konnektivitaet, aktivem Mesh, Gateway/UpLink.
-# 6) Tratten innerhalb von zwei Skript-Aufrufzyklen Probleme auf, dann -> Wifi-Restart.
-# 
-# Ausgabe:
-# Es werden Ereignisse in die eigens definierte Logdatei /tmp/log/wifi-problem-timestamps
-# und in den Systemlog eingetragen.
-# 
-###################################################################################### 
+SCRIPTNAME="ath9k-broken-wifi-workaround"
 
+# check if node has wifi
+if [ "$(ls -l /sys/class/ieee80211/phy* | wc -l)" -eq 0 ]; then
+	logger -s -t "$SCRIPTNAME" -p 5 "node has no wifi, aborting."
+	exit
+fi
 
-######################################################################################
-# 
-# Zum Debuggen und selber Rumbasteln einfach die "#" vor allen "systemlog XYZ" entfernen
-# 
-######################################################################################
-
-
-###################################################################################### 
-# Alle Kommentarzeilen werden durch das Makefile des Packages entfernt
-# sed -i '/^# /d' ath9k-broken-wifi-workaround.sh
-# sed -i '/^##/d' ath9k-broken-wifi-workaround.sh
-# 
-######################################################################################
-
-
-######################################################################################
-# 
-# Devise: 
-# Lieber einmal mehr als einmal weniger :o)
-# 
-######################################################################################
-
-
-CLIENTFILE="/tmp/ath9k-wifi-client-connect"
-PRIVATEFILE="/tmp/ath9k-wifi-private-connect"
-MESHFILE="/tmp/ath9k-wifi-mesh-connect"
-GWFILE="/tmp/ath9k-wifi-gateway-connect"
-
-RESTARTFILE="/tmp/ath9k-wifi-restart-pending"
-
-
-######################################################################################
-# Locale functions
-######################################################################################
-
-LOGFILE="/tmp/log/ath9k-wifi-problem-timestamps"
-LPREFIX="ath9k-broken-wifi-workaround"
-
-# Writes to the system log file
-systemlog() {
-echo "$LPREFIX: $1"
-logger "$LPREFIX: $1"
-}
-
-# Writes to an own log file in /tmp/log and to the systemlog as well
-# Ringbuffer, limit own log file to MAX_LINES
-multilog() {
-MAX_LINES=25
-RINGFILE=$(mktemp -t wifi-tmp-XXXXXX)
-echo "$(date) - $1" >> $LOGFILE
-tail -n $MAX_LINES $LOGFILE > $RINGFILE
-cp $RINGFILE $LOGFILE
-rm -rf $RINGFILE
-systemlog "$1"
-}
-
-
-######################################################################################
-# Check test start conditions
-######################################################################################
-
-# Check autoupdater 
+# don't do anything while an autoupdater process is running
 pgrep autoupdater >/dev/null
 if [ "$?" == "0" ]; then
-# 	systemlog "Autoupdater is running, aborting"
+	logger -s -t "$SCRIPTNAME" -p 5 "autoupdater is running, aborting."
 	exit
 fi
 
-# Check if node has wifi
-if [ ! -L /sys/class/ieee80211/phy0/device/driver ] && [ ! -L /sys/class/ieee80211/phy1/device/driver ]; then
-# 	systemlog "Node has no wifi, aborting"
+# don't run this script if another instance is still running
+exec 200<$0
+flock -n 200
+if [ "$?" != "0" ]; then
+	logger -s -t "$SCRIPTNAME" -p 5 "failed to acquire lock, another instance of this script might still be running, aborting."
 	exit
 fi
 
-# Check if node uses ath9k wifi driver
-if ! expr "$(readlink /sys/class/ieee80211/phy0/device/driver)" : ".*/ath9k" >/dev/null; then
-	if ! expr "$(readlink /sys/class/ieee80211/phy1/device/driver)" : ".*/ath9k" >/dev/null; then
-# 		systemlog "Node doesn't use the ath9k wifi driver, aborting"
-		exit
+# check if node uses ath9k wifi driver
+for i in $(ls /sys/class/net/); do
+	if expr "$(readlink /sys/class/net/$i/device/driver)" : ".*/ath9k" >/dev/null; then
+		# gather a list of interfaces
+		if [ -n "$ATH9K_IFS" ]; then
+			ATH9K_IFS="$ATH9K_IFS $i"
+		else
+			ATH9K_IFS="$i"
+		fi
+		# gather a list of devices
+		if expr "$i" : "\(client\|ibss\|mesh\)[0-9]" >/dev/null; then
+			ATH9K_UCI="$(uci show wireless | grep $i | cut -d"." -f1-2)"
+			ATH9K_DEV="$(uci get ${ATH9K_UCI}.device)"
+			if [ -n "$ATH9K_DEVS" ]; then
+				if ! expr "$ATH9K_DEVS" : ".*${ATH9K_DEV}.*" >/dev/null; then
+					ATH9K_DEVS="$ATH9K_DEVS $ATH9K_DEV"
+				fi
+			else
+				ATH9K_DEVS="$ATH9K_DEV"
+			fi
+			ATH9K_UCI=
+			ATH9K_DEV=
+		fi
+	fi
+done
+
+# check if the ath9k interface list is empty
+if [ -z "$ATH9K_IFS" ] || [ -z "$ATH9K_DEVS" ]; then
+	logger -s -t "$SCRIPTNAME" -p 5 "node doesn't use the ath9k wifi driver, aborting."
+	exit
+fi
+
+MESHFILE="/tmp/wifi-mesh-connection-active"
+CLIENTFILE="/tmp/wifi-ff-client-connection-active"
+PRIVCLIENTFILE="/tmp/wifi-priv-client-connection-active"
+GWFILE="/tmp/gateway-connection-active"
+RESTARTFILE="/tmp/wifi-restart-pending"
+RESTARTINFOFILE="/tmp/wifi-last-restart-marker-file"
+
+# check if there are connections to other nodes via wireless meshing
+WIFIMESHCONNECTIONS=0
+for wifidev in $ATH9K_IFS; do
+	if expr "$wifidev" : "\(ibss\|mesh\)[0-9]" >/dev/null; then
+		if [ "$(batctl o | egrep "$wifidev" | wc -l)" -gt 0 ]; then
+			WIFIMESHCONNECTIONS=1
+			logger -s -t "$SCRIPTNAME" -p 5	"found wifi mesh partners."
+			if [ ! -f "$MESHFILE" ]; then
+				# create file so we can check later if there was a wifi mesh connection before
+				touch $MESHFILE
+			fi
+			break
+		fi
+	fi
+done
+
+# check if there are local wifi batman clients
+WIFIFFCONNECTIONS=0
+WIFIFFCONNECTIONCOUNT="$(batctl tl | grep W | wc -l)"
+if [ "$WIFIFFCONNECTIONCOUNT" -gt 0 ]; then
+	# note: this check doesn't know which radio the clients are on
+	WIFIFFCONNECTIONS=1
+	logger -s -t "$SCRIPTNAME" -p 5 "found batman local clients."
+	if [ ! -f "$CLIENTFILE" ]; then
+		# create file so we can check later if there were batman local clients before
+		touch $CLIENTFILE
 	fi
 fi
 
-#######################################################################################
-# Observe ath9k driver problem indicators. Probably snake oil!
-#######################################################################################
+# check for clients on private wifi device
+WIFIPRIVCONNECTIONS=0
+for wifidev in $ATH9K_IFS; do
+	if expr "$wifidev" : "wlan[0-9]" >/dev/null; then
+		iw dev $wifidev station dump 2>/dev/null | grep -q Station
+		if [ "$?" == "0" ]; then
+			WIFIPRIVCONNECTIONS=1
+			logger -s -t "$SCRIPTNAME" -p 5 "found private wifi clients."
+			if [ ! -f "$PRIVCLIENTFILE" ]; then
+				# create file so we can check later if there were private wifi clients before
+				touch $PRIVCLIENTFILE
+			fi
+			break
+		fi
+	fi
+done
 
-# Check if the TX queue is stopped
-STOPPEDQUEUE=0
-if [ "$(grep BE /sys/kernel/debug/ieee80211/phy0/ath9k/queues | cut -d":" -f6 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')" -ne 0 ]; then
-	STOPPEDQUEUE=1
-# 	systemlog "Observed a stopped queue, continuing"
-fi
-
-# Check TX Path Hangs
-TXPATHHANG=0
-if [ "$(grep "TX Path Hang" /sys/kernel/debug/ieee80211/phy0/ath9k/reset | cut -d":" -f2 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')" -ne 0 ]; then
-	TXPATHHANG=1
-#	systemlog "Observed a TX Path Hang, continuing"
-fi
-
-# Combine 
-PROBLEMS=0
-if [ "$STOPPEDQUEUE" -eq 1 ] && [ "$TXPATHHANG" -eq 1 ]; then
-	PROBLEMS=1
-# 	systemlog "No problem indicators observed"
-fi
-
-######################################################################################
-# Check client wifi connectivity (client lost)
-######################################################################################
-
-# Check if there are client connectivity to this node
-CLIENTCONNECTION=0
-
-if iw dev client0 station dump | grep Station 2>&1
-then
-	CLIENTCONNECTION=1
-	touch $CLIENTFILE
-# 	systemlog "Found client connectivity"
-fi
-
-######################################################################################
-# Check private wifi connectivity (private wifi lost)
-######################################################################################
-
-# Check if there are privat wifi connectivity to this node
-PRIVATECONNECTION=0
-
-if iw dev wlan0-1 station dump | grep Station 2>&1
-then
-	PRIVATECONNECTION=1
-	touch $PRIVATEFILE
-# 	systemlog "Found private device connectivity"
-fi
-
-######################################################################################
-# Check ibss0 mesh connection (mesh lost)
-######################################################################################
-
-# Check for an active ibss0 mesh
-MESHCONNECTION=0
-if iw dev ibss0 station dump | grep Station 2>&1
-then
-	MESHCONNECTION=1
-	touch $MESHFILE
-# 	systemlog "Found a mesh"
-fi
-
-######################################################################################
-# Check gateway connection (uplink lost)
-######################################################################################
-
-# Try to ping the default gateway (needed mainly for wifi mesh only nodes)
+# check if the node can reach the default gateway
 GWCONNECTION=0
-GATEWAY=$(batctl gwl | grep "^*" | awk -F'[ ]' '{print $2}')
+GATEWAY=$(batctl gwl | grep -e "^=>" -e "^\*" | awk -F'[ ]' '{print $2}')
 if [ $GATEWAY ]; then
-	RANDOM=$(awk 'BEGIN { srand(); printf("%d\n",rand()*25) }')
-	sleep $RANDOM
-	batctl ping -c 5 $GATEWAY > /dev/null 2>&1
-	if [ $? -eq 0 ]; then
-		GWCONNECTION=1
-		touch $GWFILE
-# 		systemlog "Ping default gateway $GATEWAY ... Okay!"
+	batctl ping -c 2 $GATEWAY >/dev/null 2>&1
+	if [ "$?" == "0" ]; then
+		logger -s -t "$SCRIPTNAME" -p 5 "can ping default gateway $GATEWAY , trying ping6 on NTP servers..."
+		for i in $(uci get system.ntp.server); do
+			ping6 -c 1 $i >/dev/null 2>&1
+			if [ $? -eq 0 ]; then
+				logger -s -t "$SCRIPTNAME" -p 5	"can ping at least one of the NTP servers: $i"
+				GWCONNECTION=1
+				if [ ! -f "$GWFILE" ]; then
+					# create file so we can check later if there was a reachable gateway before
+					touch $GWFILE
+				fi
+				break
+			fi
+		done
+		if [ "$GWCONNECTION" -eq 0 ]; then
+			logger -s -t "$SCRIPTNAME" -p 5 "can't ping any of the NTP servers."
+		fi
 	else
-		systemlog "Can't ping default gateway $GATEWAY"
+		logger -s -t "$SCRIPTNAME" -p 5 "can't ping default gateway $GATEWAY ."
 	fi
 else
-	systemlog "No default gateway defined"
+	echo "no default gateway defined."
 fi
-
-######################################################################################
-# Main wifi restart logik
-######################################################################################
 
 WIFIRESTART=0
-
-# All wifi connectivity lost
-if [ "$CLIENTCONNECTION" -eq 0 ] && [ "$MESHCONNECTION" -eq 0 ] && [ "$PRIVATECONNECTION" -eq 0 ]; then
-	# There were wifi connectivity before, but there are none at the moment.
-	if [ -f "$CLIENTFILE" ] || [ -f "$MESHFILE" ] || [ -f "$PRIVATEFILE" ]; then
-		# There were client or mesh connectivity before, but there are none at the moment.
+if [ "$WIFIMESHCONNECTIONS" -eq 0 ] && [ "$WIFIPRIVCONNECTIONS" -eq 0 ] && [ "$WIFIFFCONNECTIONS" -eq 0 ]; then
+	if [ -f "$MESHFILE" ] || [ -f "$CLIENTFILE" ] || [ -f "$PRIVCLIENTFILE" ]; then
+		# no wifi connections but there was one before
 		WIFIRESTART=1
-		multilog "All wifi connectivity (client/mesh/private) lost"
+	fi
+fi
+if [ "$GWCONNECTION" -eq 0 ]; then
+	if [ -f "$GWFILE" ]; then
+		# no pingable gateway but there was one before
+		WIFIRESTART=1
 	fi
 fi
 
-# Mesh lost. This double check is just for safety reasons.
-if [ -f "$MESHFILE" ] && [ "$MESHCONNECTION" -eq 0 ]; then
-	# There were mesh connections before, but there are none at the moment.
-	WIFIRESTART=1
-	multilog "Mesh lost"
-fi
-
-# No pingable default gateway.
-if [ -f "$GWFILE" ] && [ $GWCONNECTION -eq 0 ]; then
-	WIFIRESTART=1
-	multilog "No path to the default gateway $GATEWAY"
-fi 
-
-# Some ath9k chipset problems have occurred. Probably snake oil!
-if [ $PROBLEMS -eq 1 ]; then
-        WIFIRESTART=1
-        multilog "TX queue is stopped and TX path hangs"
-fi  
-
-
-######################################################################################
-# Should I really do it?
-######################################################################################
-
 if [ ! -f "$RESTARTFILE" ] && [ "$WIFIRESTART" -eq 1 ]; then
+	# delaying wifi restart until the next script run
 	touch $RESTARTFILE
-	multilog "Wifi restart is pending"
-elif [ $WIFIRESTART -eq 1 ]; then
-	multilog "*** Wifi restarted ***"
-	rm -rf $CLIENTFILE
-	rm -rf $MESHFILE
-	rm -rf $PRIVATEFILE
-	rm -rf $GWFILE
-	rm -rf $RESTARTFILE
-	/sbin/wifi
+	logger -s -t "$SCRIPTNAME" -p 5 "wifi restart possible on next script run."
+elif [ "$WIFIRESTART" -eq 1 ]; then
+	logger -s -t "$SCRIPTNAME" -p 5 "restarting wifi."
+	[ "$GWCONNECTION" -eq 0 ] && rm -f $GWFILE
+	rm -f $MESHFILE
+	rm -f $CLIENTFILE
+	rm -f $PRIVCLIENTFILE
+	rm -f $RESTARTFILE
+	touch $RESTARTINFOFILE
+	for wifidev in $ATH9K_DEVS; do
+		wifi down $wifidev
+	done
+	sleep 1
+	for wifidev in $ATH9K_DEVS; do
+		wifi up $wifidev
+	done
 else
-# 	systemlog "Everything seems to be ok"
-	rm -rf $RESTARTFILE
+	logger -s -t "$SCRIPTNAME" -p 5 "everything seems to be ok."
+	rm -f $RESTARTFILE
 fi
